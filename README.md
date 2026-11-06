@@ -1,5 +1,5 @@
-# Unified Async LLM Client
-
+# CaroM-LLM-Client | Unified Async LLM Client
+[![Python Tests](https://github.com/carolinamolfino-bsas/CaroM-LLM-Client/actions/workflows/tests.yml/badge.svg)](https://github.com/carolinamolfino-bsas/CaroM-LLM-Client/actions/workflows/tests.yml)
 Cliente asíncrono unificado para **OpenAI** y **Anthropic** en Python 3.12: una única interfaz (`AsyncLLMManager`) con generación normal, **streaming** token a token, validación con **Pydantic** y manejo de errores controlado (sin crashes por API key inválida, rate limit o caída de red).
 
 ## Estructura
@@ -22,8 +22,8 @@ unified-llm-client/
 ## Instalación
 
 ```bash
-git clone <URL-del-repo>
-cd unified-llm-client
+git clone https://github.com/carolinamolfino-bsas/CaroM-LLM-Client.git
+cd CaroM-LLM-Client
 
 python3.12 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
@@ -68,6 +68,23 @@ python -m pytest -q
 ```
 
 No necesitan API keys: simulan los SDKs para verificar validación, streaming, reintentos, errores controlados y que el event loop no se bloquee.
+
+### Resultados de validación
+
+El proyecto fue validado mediante 20 pruebas automatizadas utilizando `pytest`.
+
+| Entorno | Versión de Python | Resultado | Tiempo |
+|---|---|---|---|
+| Windows (local) | 3.12.10 | 20/20 PASSED | 4.53 s |
+| Ubuntu (GitHub Actions) | 3.12.16 | 20/20 PASSED | 1.54 s |
+
+**Integración continua (CI):** GitHub Actions ejecuta automáticamente las pruebas con cada `push` o `pull request` a la rama `main`.
+
+[Consultar las ejecuciones de GitHub Actions](https://github.com/carolinamolfino-bsas/CaroM-LLM-Client/actions)
+
+**Alcance de la validación:** las pruebas automatizadas utilizan mocks de los SDK de OpenAI y Anthropic. Verifican la lógica de validación, generación, streaming, manejo de errores, reintentos y concurrencia sin consumir créditos de API.
+
+**Limitación:** las llamadas reales a las APIs de OpenAI y Anthropic no fueron verificadas por no disponer de créditos de API.
 
 ## Uso como librería
 
@@ -120,4 +137,4 @@ Desde la versión de API `2026-10-21` (SDK `anthropic` >= 2.0), la Messages API 
 - **SDK `anthropic` 2.x:** no envía esos parámetros (se usa el muestreo por defecto del modelo). `LLM_TEMPERATURE` sigue validándose y se aplica a OpenAI.
 - **SDK `anthropic` 1.x:** los envía, ajustando `temperature` al rango [0, 1] que acepta Anthropic.
 
-Si necesitás controlar la temperatura en Anthropic, fijá `anthropic>=1,<2` en `requirements.txt`.
+**Compatibilidad:** la disponibilidad de los parámetros `temperature`, `top_p` y `top_k` depende de la versión de la API y del modelo de Anthropic utilizado. El cliente comprueba la firma del SDK para determinar qué parámetros puede enviar. Esta comprobación no garantiza por sí sola la compatibilidad con todos los modelos o versiones de la API. Se recomienda utilizar versiones actualizadas del SDK y verificar los parámetros admitidos antes de realizar llamadas reales.
