@@ -321,3 +321,19 @@ def test_event_loop_not_blocked():
         return loop.time() - t0
 
     assert run(both()) < 0.5
+
+def test_invalid_provider_is_handled():
+    """Un proveedor inválido debe generar un error controlado."""
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "main.py", "--provider", "google"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode != 0
+    assert "invalid choice" in result.stderr or "no reconocido" in result.stdout
+    assert "Traceback" not in result.stderr

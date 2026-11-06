@@ -38,6 +38,9 @@ async def run_provider(provider: Provider) -> bool:
     except ValidationError as exc:
         print(f"[{provider}] Configuración inválida en .env:\n{exc}")
         return False
+    except ValueError as exc:
+        print(f"[{provider}] Error de configuración: {exc}. Proveedores admitidos: openai, anthropic.")
+        return False
     except MissingAPIKeyError as exc:
         print(f"[{provider}] {exc}. Se omite este proveedor.")
         return False
@@ -88,8 +91,17 @@ async def main() -> int:
     )
     args = parser.parse_args()
 
-    selected = args.provider or os.getenv("LLM_PROVIDER", "openai").lower()
-    providers = list(Provider) if selected == "all" else [Provider(selected)]
+    selected = (args.provider or os.getenv("LLM_PROVIDER", "openai")).lower()
+
+    try:
+        providers = list(Provider) if selected == "all" else [Provider(selected)]
+    except ValueError:
+        print(
+            f"Error de configuración: proveedor '{selected}' no reconocido. "
+            "Proveedores admitidos: openai, anthropic, all."
+        )
+        return 1
+    return 1
 
     results = {p: await run_provider(p) for p in providers}
 
