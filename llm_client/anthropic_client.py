@@ -12,8 +12,6 @@ from anthropic import AsyncAnthropic
 from .base import BaseLLMClient
 from .schemas import (
     ChatRequest,
-    ErrorType,
-    LLMError,
     ModelConfig,
     ModelResponse,
     Provider,
@@ -28,13 +26,19 @@ ANTHROPIC_MAX_TEMPERATURE = 1.0
 # Desde la versión de API 2026-10-21 (SDK `anthropic` >= 2.0) la Messages API
 # rechaza `temperature`, `top_p` y `top_k`, y el SDK los quitó de su firma.
 # Se detecta en tiempo de ejecución para funcionar con SDK 1.x y 2.x.
-SUPPORTS_SAMPLING_PARAMS = "temperature" in inspect.signature(
-    anthropic.resources.messages.AsyncMessages.create
-).parameters
+def anthropic_supports_sampling() -> bool:
+    """True si el SDK instalado todavía acepta temperature/top_p (SDK 1.x)."""
+    return "temperature" in inspect.signature(
+        anthropic.resources.messages.AsyncMessages.create
+    ).parameters
+
+
+SUPPORTS_SAMPLING_PARAMS = anthropic_supports_sampling()
 
 
 class AnthropicClient(BaseLLMClient):
     provider = Provider.ANTHROPIC
+    sdk = anthropic
 
     def __init__(
         self,
@@ -55,6 +59,22 @@ class AnthropicClient(BaseLLMClient):
                 "SDK anthropic >= 2.0: temperature/top_p no se envían "
                 "(la API 2026-10-21 los rechaza; se usa el muestreo por defecto)."
             )
+
+    def param_warnings(self) -> list[str]:
+        """Avisa cuando el usuario pidió explícitamente un parámetro que no se aplica."""
+        pedidos = self.config.model_fields_set
+        warnings: list[str] = []
+        if not self._send_sampling:
+            for name in ("temperature", "top_p"):
+                if name in pedidos:
+                    warnings.append(
+                        f"'{name}' ignorado: la API de Anthropic (2026-10-21) ya no lo acepta"
+                    )
+        elif self.config.temperature > ANTHROPIC_MAX_TEMPERATURE:
+            warnings.append(
+                f"temperature={self.config.temperature} ajustada a 1.0 (máximo de Anthropic)"
+            )
+        return warnings
 
     def _params(self, request: ChatRequest) -> dict:
         # Anthropic recibe el system prompt aparte, no dentro de `messages`.
@@ -113,32 +133,6 @@ class AnthropicClient(BaseLLMClient):
                 input_tokens=final.usage.input_tokens,
                 output_tokens=final.usage.output_tokens,
             ),
-        )
-
-    def _classify_error(self, exc: Exception) -> LLMError:
-        status = getattr(exc, "status_code", None)
-        if isinstance(exc, anthropic.APITimeoutError):
-            etype, retry = ErrorType.TIMEOUT, True
-        elif isinstance(exc, anthropic.APIConnectionError):
-            etype, retry = ErrorType.CONNECTION, True
-        elif isinstance(exc, anthropic.AuthenticationError | anthropic.PermissionDeniedError):
-            etype, retry = ErrorType.AUTHENTICATION, False
-        elif isinstance(exc, anthropic.RateLimitError):
-            etype, retry = ErrorType.RATE_LIMIT, True
-        elif isinstance(exc, anthropic.InternalServerError) or status == 529:
-            # 529 = "overloaded" en Anthropic: vale la pena reintentar.
-            etype, retry = ErrorType.SERVER, True
-        elif isinstance(exc, anthropic.BadRequestError | anthropic.NotFoundError
-                        | anthropic.UnprocessableEntityError):
-            etype, retry = ErrorType.BAD_REQUEST, False
-        else:
-            etype, retry = ErrorType.UNKNOWN, False
-        return LLMError(
-            type=etype,
-            message=str(exc) or exc.__class__.__name__,
-            provider=self.provider,
-            status_code=status,
-            retryable=retry,
         )
 
     async def aclose(self) -> None:

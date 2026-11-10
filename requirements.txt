@@ -1,7 +1,5 @@
-openai>=1.40
-anthropic>=0.40
-pydantic>=2.7
-python-dotenv>=1.0
-
-# desarrollo
-pytest>=8.0
+# Dependencias de ejecución (mismos rangos que pyproject.toml)
+openai>=3.46,<4
+anthropic>=2.6,<3
+pydantic>=2.11,<3
+python-dotenv>=1.0,<2

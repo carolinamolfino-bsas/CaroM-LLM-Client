@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import AsyncIterator, Sequence
 
@@ -17,13 +18,19 @@ DEFAULT_MODELS: dict[Provider, str] = {
     Provider.ANTHROPIC: "claude-haiku-4-5",
 }
 
+API_KEY_ENV: dict[Provider, str] = {
+    Provider.OPENAI: "OPENAI_API_KEY",
+    Provider.ANTHROPIC: "ANTHROPIC_API_KEY",
+}
+MODEL_ENV: dict[Provider, str] = {
+    Provider.OPENAI: "OPENAI_MODEL",
+    Provider.ANTHROPIC: "ANTHROPIC_MODEL",
+}
+
 _REGISTRY: dict[Provider, type[BaseLLMClient]] = {
     Provider.OPENAI: OpenAIClient,
     Provider.ANTHROPIC: AnthropicClient,
 }
-
-_KEY_ENV = {Provider.OPENAI: "OPENAI_API_KEY", Provider.ANTHROPIC: "ANTHROPIC_API_KEY"}
-_MODEL_ENV = {Provider.OPENAI: "OPENAI_MODEL", Provider.ANTHROPIC: "ANTHROPIC_MODEL"}
 
 
 class MissingAPIKeyError(ValueError):
@@ -31,21 +38,30 @@ class MissingAPIKeyError(ValueError):
 
 
 class ManagerSettings(BaseModel):
-    """Configuración del manager (validada con Pydantic)."""
+    """Configuración del manager (validada con Pydantic).
+
+    Es reutilizable desde otros proyectos (ej. un pipeline de LangChain):
+    `ManagerSettings.from_env()` devuelve proveedor, API key y ModelConfig
+    validados, sin crear ningún cliente.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     provider: Provider
     api_key: SecretStr | None = None  # SecretStr evita que la key aparezca en logs
     model: ModelConfig
+    max_concurrency: int = Field(
+        default=5, ge=1, le=100,
+        description="Máximo de llamadas simultáneas al proveedor (evita el rate limit).",
+    )
 
     @classmethod
-    def from_env(cls, provider: str | Provider | None = None) -> "ManagerSettings":
+    def from_env(cls, provider: str | Provider | None = None) -> ManagerSettings:
         """Construye la configuración desde variables de entorno (.env)."""
-        prov = Provider((provider or os.getenv("LLM_PROVIDER", "openai")).lower())
-        key = os.getenv(_KEY_ENV[prov])
+        prov = Provider(str(provider or os.getenv("LLM_PROVIDER") or "openai").lower())
+        key = os.getenv(API_KEY_ENV[prov])
         model_kwargs: dict = {
-            "model": os.getenv(_MODEL_ENV[prov]) or DEFAULT_MODELS[prov],
+            "model": os.getenv(MODEL_ENV[prov]) or DEFAULT_MODELS[prov],
         }
         for env, field in (
             ("LLM_TEMPERATURE", "temperature"),
@@ -55,11 +71,24 @@ class ManagerSettings(BaseModel):
         ):
             if (value := os.getenv(env)) not in (None, ""):
                 model_kwargs[field] = value  # Pydantic convierte y valida tipos/rangos
+        extra: dict = {}
+        if (value := os.getenv("LLM_MAX_CONCURRENCY")) not in (None, ""):
+            extra["max_concurrency"] = value
         return cls(
             provider=prov,
             api_key=SecretStr(key) if key else None,
             model=ModelConfig(**model_kwargs),
+            **extra,
         )
+
+    def require_api_key(self) -> str:
+        """Devuelve la API key o lanza MissingAPIKeyError con un mensaje claro."""
+        if self.api_key is None:
+            raise MissingAPIKeyError(
+                f"Falta {API_KEY_ENV[self.provider]} para el proveedor "
+                f"'{self.provider}'. Configurala en el archivo .env"
+            )
+        return self.api_key.get_secret_value()
 
 
 class AsyncLLMManager:
@@ -72,19 +101,15 @@ class AsyncLLMManager:
     """
 
     def __init__(self, settings: ManagerSettings) -> None:
-        if settings.api_key is None:
-            raise MissingAPIKeyError(
-                f"Falta {_KEY_ENV[settings.provider]} para el proveedor "
-                f"'{settings.provider}'. Configurala en el archivo .env"
-            )
+        key = settings.require_api_key()
         self.settings = settings
-        client_cls = _REGISTRY[settings.provider]
-        self.client: BaseLLMClient = client_cls(
-            settings.model, api_key=settings.api_key.get_secret_value()
-        )
+        self.client: BaseLLMClient = _REGISTRY[settings.provider](settings.model, api_key=key)
+        # Limita las llamadas simultáneas: con muchas tareas en paralelo
+        # (asyncio.gather) se evita disparar el rate limit del proveedor.
+        self._semaphore = asyncio.Semaphore(settings.max_concurrency)
 
     @classmethod
-    def from_env(cls, provider: str | Provider | None = None) -> "AsyncLLMManager":
+    def from_env(cls, provider: str | Provider | None = None) -> AsyncLLMManager:
         return cls(ManagerSettings.from_env(provider))
 
     @property
@@ -92,16 +117,27 @@ class AsyncLLMManager:
         return self.settings.provider
 
     async def generate(self, messages: Sequence[ChatMessage]) -> ModelResponse:
-        return await self.client.generate(messages)
+        async with self._semaphore:
+            return await self.client.generate(messages)
+
+    async def generate_many(
+        self, conversations: Sequence[Sequence[ChatMessage]]
+    ) -> list[ModelResponse]:
+        """Procesa varias conversaciones en paralelo, respetando max_concurrency.
+
+        El orden de las respuestas coincide con el de las conversaciones.
+        """
+        return list(await asyncio.gather(*(self.generate(c) for c in conversations)))
 
     async def stream(self, messages: Sequence[ChatMessage]) -> AsyncIterator[StreamChunk]:
-        async for chunk in self.client.stream(messages):
-            yield chunk
+        async with self._semaphore:  # el cupo se mantiene mientras dura el stream
+            async for chunk in self.client.stream(messages):
+                yield chunk
 
     async def aclose(self) -> None:
         await self.client.aclose()
 
-    async def __aenter__(self) -> "AsyncLLMManager":
+    async def __aenter__(self) -> AsyncLLMManager:
         return self
 
     async def __aexit__(self, *exc_info: object) -> None:

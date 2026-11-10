@@ -337,3 +337,87 @@ def test_invalid_provider_is_handled():
     assert result.returncode != 0
     assert "invalid choice" in result.stderr or "no reconocido" in result.stdout
     assert "Traceback" not in result.stderr
+
+
+# ---------------------------------------------------------------- v1.1
+
+def test_main_runs_providers_without_keys():
+    """Regresión: main.py debe llegar a ejecutar los proveedores (no cortar antes)."""
+    import os
+    import subprocess
+    import sys
+
+    env = {**os.environ, "OPENAI_API_KEY": "", "ANTHROPIC_API_KEY": ""}
+    result = subprocess.run(
+        [sys.executable, "main.py", "--provider", "all"],
+        capture_output=True, text=True, timeout=30, env=env,
+    )
+    assert "Falta OPENAI_API_KEY" in result.stdout
+    assert "Falta ANTHROPIC_API_KEY" in result.stdout
+    assert "Resumen" in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+def test_missing_key_message_is_not_provider_error(monkeypatch):
+    """MissingAPIKeyError hereda de ValueError: no debe confundirse con proveedor inválido."""
+    from llm_client import MissingAPIKeyError
+
+    assert issubclass(MissingAPIKeyError, ValueError)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(MissingAPIKeyError, match="ANTHROPIC_API_KEY"):
+        AsyncLLMManager.from_env("anthropic")
+
+
+def test_semaphore_limits_concurrency(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("LLM_MAX_CONCURRENCY", "2")
+    manager = AsyncLLMManager.from_env("openai")
+    active = peak = 0
+
+    async def create(**kw):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.05)
+        active -= 1
+        return SimpleNamespace(
+            model="gpt-test",
+            choices=[SimpleNamespace(message=SimpleNamespace(content="ok"), finish_reason="stop")],
+            usage=None,
+        )
+
+    manager.client._client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+    responses = run(manager.generate_many([MSGS] * 6))
+    assert len(responses) == 6 and all(r.ok for r in responses)
+    assert peak == 2
+
+
+def test_anthropic_warns_when_temperature_ignored():
+    async def create(**kw):
+        assert "temperature" not in kw
+        return SimpleNamespace(
+            model="claude-test", stop_reason="end_turn",
+            content=[SimpleNamespace(type="text", text="ok")],
+            usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+        )
+
+    c = AnthropicClient(ModelConfig(model="claude-test", temperature=0.2),
+                        api_key="sk-ant-test", send_sampling_params=False)
+    c._client = SimpleNamespace(messages=SimpleNamespace(create=create))
+    r = run(c.generate(MSGS))
+    assert r.ok and any("temperature" in w for w in r.warnings)
+
+
+def test_no_warning_when_temperature_not_requested():
+    c = AnthropicClient(ModelConfig(model="claude-test"), api_key="k", send_sampling_params=False)
+    assert c.param_warnings() == []
+
+
+def test_shared_error_classification_for_both_sdks():
+    oc = OpenAIClient(ModelConfig(model="m"), api_key="k")
+    ac = AnthropicClient(ModelConfig(model="m"), api_key="k")
+    assert oc._classify_error(http_error(openai.InternalServerError, 503)).retryable
+    assert ac._classify_error(http_error(anthropic.RateLimitError, 429)).type is ErrorType.RATE_LIMIT
+    assert not ac._classify_error(http_error(anthropic.AuthenticationError, 401)).retryable

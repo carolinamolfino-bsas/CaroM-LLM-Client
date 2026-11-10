@@ -88,6 +88,10 @@ class ModelResponse(BaseModel):
     usage: Usage | None = None
     latency_ms: float | None = None
     error: LLMError | None = None
+    warnings: list[str] = Field(
+        default_factory=list,
+        description="Avisos no fatales, ej. parámetros que el proveedor ignoró.",
+    )
 
     @property
     def ok(self) -> bool:
@@ -100,9 +104,11 @@ class StreamChunk(BaseModel):
     - Fragmento normal: `text` con el delta de tokens.
     - Fin del stream: `done=True` (puede traer `usage`).
     - Falla: `error` con el detalle y `done=True`.
+    - `warnings` viaja en el chunk final (igual que en ModelResponse).
     """
 
     text: str = ""
     done: bool = False
     usage: Usage | None = None
     error: LLMError | None = None
+    warnings: list[str] = Field(default_factory=list)

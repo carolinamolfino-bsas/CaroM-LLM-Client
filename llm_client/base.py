@@ -8,10 +8,12 @@ import random
 import time
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Sequence
+from types import ModuleType
 
 from .schemas import (
     ChatMessage,
     ChatRequest,
+    ErrorType,
     LLMError,
     ModelConfig,
     ModelResponse,
@@ -25,18 +27,21 @@ logger = logging.getLogger("llm_client")
 class BaseLLMClient(ABC):
     """Interfaz común.
 
-    Las subclases sólo implementan:
-      * `_generate_raw`  -> una llamada no-streaming al SDK
-      * `_stream_raw`    -> el stream del SDK, traducido a StreamChunk
-      * `_classify_error`-> mapear excepciones del SDK a LLMError
+    Las subclases implementan:
+      * `sdk`           -> el módulo del SDK oficial (`openai` o `anthropic`)
+      * `_generate_raw` -> una llamada no-streaming al SDK
+      * `_stream_raw`   -> el stream del SDK, traducido a StreamChunk
 
-    El manejo de reintentos, validación y errores controlados vive acá,
-    así no se duplica entre proveedores.
+    Reintentos, validación, clasificación de errores y avisos viven acá, así no
+    se duplican entre proveedores. Los dos SDKs oficiales exponen la misma
+    jerarquía de excepciones (APITimeoutError, RateLimitError, ...), por eso
+    una única función de clasificación sirve para ambos.
     """
 
     provider: Provider
+    sdk: ModuleType
 
-    def __init__(self, config: ModelConfig) -> None:
+    def __init__(self, config: ModelConfig, api_key: str | None = None) -> None:
         self.config = config
 
     # ---------- API pública ----------
@@ -45,6 +50,7 @@ class BaseLLMClient(ABC):
         """Genera una respuesta completa. Nunca lanza excepciones de API:
         ante un fallo devuelve un ModelResponse con `error` cargado."""
         request = ChatRequest(messages=list(messages))
+        warnings = self.param_warnings()
         attempt = 0
         while True:
             attempt += 1
@@ -52,6 +58,7 @@ class BaseLLMClient(ABC):
             try:
                 response = await self._generate_raw(request)
                 response.latency_ms = round((time.perf_counter() - start) * 1000, 1)
+                response.warnings = warnings
                 return response
             except asyncio.CancelledError:
                 raise  # nunca tragarse una cancelación del event loop
@@ -63,7 +70,8 @@ class BaseLLMClient(ABC):
                     continue
                 logger.error("[%s] %s: %s", self.provider, error.type, error.message)
                 return ModelResponse(
-                    provider=self.provider, model=self.config.model, error=error
+                    provider=self.provider, model=self.config.model,
+                    error=error, warnings=warnings,
                 )
 
     async def stream(self, messages: Sequence[ChatMessage]) -> AsyncIterator[StreamChunk]:
@@ -74,6 +82,7 @@ class BaseLLMClient(ABC):
         chunk `done=True`, con o sin `error`.
         """
         request = ChatRequest(messages=list(messages))
+        warnings = self.param_warnings()
         attempt = 0
         while True:
             attempt += 1
@@ -82,6 +91,8 @@ class BaseLLMClient(ABC):
                 async for chunk in self._stream_raw(request):
                     if chunk.text:
                         emitted = True
+                    if chunk.done:
+                        chunk.warnings = warnings
                     yield chunk
                 return
             except asyncio.CancelledError:
@@ -93,13 +104,17 @@ class BaseLLMClient(ABC):
                     await self._backoff(attempt, error)
                     continue
                 logger.error("[%s] stream %s: %s", self.provider, error.type, error.message)
-                yield StreamChunk(done=True, error=error)
+                yield StreamChunk(done=True, error=error, warnings=warnings)
                 return
 
-    async def aclose(self) -> None:
+    def param_warnings(self) -> list[str]:
+        """Parámetros pedidos por el usuario que este proveedor no aplicará."""
+        return []
+
+    async def aclose(self) -> None:  # noqa: B027 - hook opcional, no abstracto
         """Cierra el cliente HTTP subyacente."""
 
-    async def __aenter__(self) -> "BaseLLMClient":
+    async def __aenter__(self) -> BaseLLMClient:
         return self
 
     async def __aexit__(self, *exc_info: object) -> None:
@@ -113,8 +128,39 @@ class BaseLLMClient(ABC):
     @abstractmethod
     def _stream_raw(self, request: ChatRequest) -> AsyncIterator[StreamChunk]: ...
 
-    @abstractmethod
-    def _classify_error(self, exc: Exception) -> LLMError: ...
+    # ---------- clasificación de errores (común) ----------
+
+    def _is_permanent_rate_limit(self, exc: Exception) -> bool:
+        """429 que NO se arregla reintentando (ej. cuota agotada). Hook opcional."""
+        return False
+
+    def _classify_error(self, exc: Exception) -> LLMError:
+        sdk = self.sdk
+        status: int | None = getattr(exc, "status_code", None)
+        retry = False
+        # El orden importa: APITimeoutError hereda de APIConnectionError.
+        if isinstance(exc, sdk.APITimeoutError):
+            etype, retry = ErrorType.TIMEOUT, True
+        elif isinstance(exc, sdk.APIConnectionError):
+            etype, retry = ErrorType.CONNECTION, True
+        elif isinstance(exc, sdk.AuthenticationError | sdk.PermissionDeniedError):
+            etype = ErrorType.AUTHENTICATION
+        elif isinstance(exc, sdk.RateLimitError):
+            etype, retry = ErrorType.RATE_LIMIT, not self._is_permanent_rate_limit(exc)
+        elif isinstance(exc, sdk.InternalServerError) or (status is not None and status >= 500):
+            # Incluye el 529 "overloaded" de Anthropic.
+            etype, retry = ErrorType.SERVER, True
+        elif isinstance(exc, sdk.BadRequestError | sdk.NotFoundError | sdk.UnprocessableEntityError):
+            etype = ErrorType.BAD_REQUEST
+        else:
+            etype = ErrorType.UNKNOWN
+        return LLMError(
+            type=etype,
+            message=str(exc) or exc.__class__.__name__,
+            provider=self.provider,
+            status_code=status,
+            retryable=retry,
+        )
 
     # ---------- utilidades ----------
 

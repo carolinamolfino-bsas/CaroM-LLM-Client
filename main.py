@@ -33,16 +33,19 @@ def banner(text: str) -> None:
 
 async def run_provider(provider: Provider) -> bool:
     """Corre ambos modos para un proveedor. Devuelve True si los dos funcionaron."""
+    # El orden importa: ValidationError y MissingAPIKeyError heredan de
+    # ValueError, así que van antes que el ValueError genérico.
     try:
         manager = AsyncLLMManager.from_env(provider)
     except ValidationError as exc:
         print(f"[{provider}] Configuración inválida en .env:\n{exc}")
         return False
-    except ValueError as exc:
-        print(f"[{provider}] Error de configuración: {exc}. Proveedores admitidos: openai, anthropic.")
-        return False
     except MissingAPIKeyError as exc:
         print(f"[{provider}] {exc}. Se omite este proveedor.")
+        return False
+    except ValueError as exc:
+        print(f"[{provider}] Error de configuración: {exc}. "
+              "Proveedores admitidos: openai, anthropic.")
         return False
 
     ok = True
@@ -52,6 +55,8 @@ async def run_provider(provider: Provider) -> bool:
         # ---- Modo normal ----
         banner(f"{provider.upper()} · {model} · modo normal")
         resp = await manager.generate(MESSAGES)
+        for warning in resp.warnings:
+            print(f"AVISO: {warning}")
         if resp.ok:
             print(resp.content)
             if resp.usage:
@@ -75,7 +80,9 @@ async def run_provider(provider: Provider) -> bool:
                 e = chunk.error
                 print(f"\nERROR CONTROLADO -> {e.type} (HTTP {e.status_code}, "
                       f"intentos={e.attempts}): {e.message[:200]}")
-            elif chunk.done and chunk.usage:
+            for warning in chunk.warnings:
+                print(f"\nAVISO: {warning}")
+            if chunk.done and chunk.usage and not chunk.error:
                 print(f"\n\n[tokens in={chunk.usage.input_tokens} "
                       f"out={chunk.usage.output_tokens}]")
     return ok
@@ -101,7 +108,6 @@ async def main() -> int:
             "Proveedores admitidos: openai, anthropic, all."
         )
         return 1
-    return 1
 
     results = {p: await run_provider(p) for p in providers}
 

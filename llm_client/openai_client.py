@@ -10,8 +10,6 @@ from openai import AsyncOpenAI
 from .base import BaseLLMClient
 from .schemas import (
     ChatRequest,
-    ErrorType,
-    LLMError,
     ModelConfig,
     ModelResponse,
     Provider,
@@ -22,6 +20,7 @@ from .schemas import (
 
 class OpenAIClient(BaseLLMClient):
     provider = Provider.OPENAI
+    sdk = openai
 
     def __init__(self, config: ModelConfig, api_key: str | None = None) -> None:
         super().__init__(config)
@@ -80,33 +79,9 @@ class OpenAIClient(BaseLLMClient):
                     yield StreamChunk(text=delta)
         yield StreamChunk(done=True, usage=usage)
 
-    def _classify_error(self, exc: Exception) -> LLMError:
-        status = getattr(exc, "status_code", None)
-        # El orden importa: APITimeoutError hereda de APIConnectionError.
-        if isinstance(exc, openai.APITimeoutError):
-            etype, retry = ErrorType.TIMEOUT, True
-        elif isinstance(exc, openai.APIConnectionError):
-            etype, retry = ErrorType.CONNECTION, True
-        elif isinstance(exc, openai.AuthenticationError | openai.PermissionDeniedError):
-            etype, retry = ErrorType.AUTHENTICATION, False
-        elif isinstance(exc, openai.RateLimitError):
-            # "insufficient_quota" es un 429 que NO se arregla reintentando.
-            code = getattr(exc, "code", None)
-            etype, retry = ErrorType.RATE_LIMIT, code != "insufficient_quota"
-        elif isinstance(exc, openai.InternalServerError):
-            etype, retry = ErrorType.SERVER, True
-        elif isinstance(exc, openai.BadRequestError | openai.NotFoundError
-                        | openai.UnprocessableEntityError):
-            etype, retry = ErrorType.BAD_REQUEST, False
-        else:
-            etype, retry = ErrorType.UNKNOWN, False
-        return LLMError(
-            type=etype,
-            message=str(exc) or exc.__class__.__name__,
-            provider=self.provider,
-            status_code=status,
-            retryable=retry,
-        )
+    def _is_permanent_rate_limit(self, exc: Exception) -> bool:
+        # "insufficient_quota" es un 429 que NO se arregla reintentando.
+        return getattr(exc, "code", None) == "insufficient_quota"
 
     async def aclose(self) -> None:
         await self._client.close()
