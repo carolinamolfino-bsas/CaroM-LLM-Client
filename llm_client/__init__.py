@@ -4,6 +4,7 @@ from .anthropic_client import AnthropicClient, anthropic_supports_sampling
 from .base import BaseLLMClient
 from .manager import (
     API_KEY_ENV,
+    BASE_URL_ENV,
     DEFAULT_MODELS,
     MODEL_ENV,
     AsyncLLMManager,
@@ -23,10 +24,11 @@ from .schemas import (
     Usage,
 )
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 __all__ = [
     "API_KEY_ENV",
+    "BASE_URL_ENV",
     "DEFAULT_MODELS",
     "MODEL_ENV",
     "AnthropicClient",

@@ -12,7 +12,7 @@ CaroM-LLM-Client/
 │   ├── openai_client.py     # OpenAIClient    -> AsyncOpenAI
 │   ├── anthropic_client.py  # AnthropicClient -> AsyncAnthropic
 │   └── manager.py           # AsyncLLMManager: proveedor por configuración + límite de concurrencia
-├── tests/test_client.py     # 27 tests offline (SDKs simulados, no gastan tokens)
+├── tests/                   # 30 tests offline + servidor HTTP falso compatible con OpenAI
 ├── main.py                  # Script de validación: modo normal + streaming
 ├── .github/workflows/tests.yml  # CI: ruff + mypy + pytest en cada push
 ├── pyproject.toml           # Paquete instalable (carom-llm-client) + config de ruff/mypy
@@ -45,6 +45,7 @@ cp .env.example .env               # Windows: copy .env.example .env
 | `OPENAI_API_KEY` | Si usás OpenAI | — | Clave de https://platform.openai.com |
 | `ANTHROPIC_API_KEY` | Si usás Anthropic | — | Clave de https://console.anthropic.com |
 | `OPENAI_MODEL` | No | `gpt-4o-mini` | Modelo de OpenAI |
+| `OPENAI_BASE_URL` | No | — | Servidor compatible con la API de OpenAI (ej. Ollama: `http://localhost:11434/v1`). Vacío = OpenAI oficial |
 | `ANTHROPIC_MODEL` | No | `claude-haiku-4-5` | Modelo de Anthropic |
 | `LLM_TEMPERATURE` | No | `0.7` | 0 a 2 (validado) |
 | `LLM_MAX_TOKENS` | No | `512` | Tokens máximos de salida (> 0) |
@@ -64,6 +65,26 @@ python main.py --provider all         # prueba los dos
 ```
 
 Pregunta *"¿Qué es la entropía?"* primero en modo normal (respuesta completa + tokens + latencia) y después en streaming (el texto aparece a medida que llega). Termina con un resumen OK/FALLÓ por proveedor (código de salida 0 si todo funcionó).
+
+## Probar gratis, sin API key (Ollama)
+
+[Ollama](https://ollama.com) es un programa que corre modelos de lenguaje en tu propia computadora y expone una API compatible con la de OpenAI. Con `OPENAI_BASE_URL` el cliente le habla a Ollama igual que a OpenAI, sin key ni costo. **Ollama y el modelo no son parte del repo:** se instalan sólo en la máquina donde querés probar.
+
+1. Instalá Ollama desde https://ollama.com/download (Windows, macOS o Linux).
+2. Descargá un modelo (una sola vez, ~2 GB):
+   ```bash
+   ollama pull llama3.2:3b
+   ```
+3. En tu `.env`:
+   ```
+   LLM_PROVIDER=openai
+   OPENAI_BASE_URL=http://localhost:11434/v1
+   OPENAI_API_KEY=ollama
+   OPENAI_MODEL=llama3.2:3b
+   ```
+4. Corré `python main.py`. El encabezado muestra `llama3.2:3b @ http://localhost:11434/v1`.
+
+Con un servidor compatible el cliente envía `max_tokens` (el nombre que documentan Ollama, LM Studio o vLLM) en lugar de `max_completion_tokens`, que es exclusivo de OpenAI. Un modelo local chico responde más lento y con menos calidad que GPT o Claude, pero la respuesta es real.
 
 ## Ejecutar los tests y los controles de calidad
 
@@ -85,6 +106,8 @@ No necesitan API keys: simulan los SDKs para verificar validación, streaming, r
 |---|---|---|---|
 | Windows (local) | 3.12.10 | 20/20 PASSED | 4.53 s |
 | Ubuntu (GitHub Actions) | 3.12.16 | 20/20 PASSED | 1.54 s |
+
+**v1.2** — 30 pruebas: se agregó `OPENAI_BASE_URL`, verificada con llamadas HTTP reales a un servidor local que imita a Ollama (modo normal y streaming).
 
 **v1.1** — 27 pruebas (se agregaron concurrencia, avisos de parámetros, clasificación de errores compartida y regresión de `main.py`). Resultados en la pestaña Actions del repositorio.
 
@@ -136,7 +159,7 @@ llm = AsyncLLMManager(settings)
 El cliente es un paquete instalable, así otros proyectos lo reutilizan sin copiar código (la Pre-entrega 2 lo usa así):
 
 ```bash
-pip install "carom-llm-client @ git+https://github.com/carolinamolfino-bsas/CaroM-LLM-Client.git@v1.1.0"
+pip install "carom-llm-client @ git+https://github.com/carolinamolfino-bsas/CaroM-LLM-Client.git@v1.2.0"
 ```
 
 ```python

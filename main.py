@@ -51,6 +51,8 @@ async def run_provider(provider: Provider) -> bool:
     ok = True
     async with manager:
         model = manager.settings.model.model
+        if manager.settings.base_url:
+            model = f"{model} @ {manager.settings.base_url}"
 
         # ---- Modo normal ----
         banner(f"{provider.upper()} · {model} · modo normal")

@@ -6,7 +6,7 @@ import asyncio
 import os
 from collections.abc import AsyncIterator, Sequence
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from .anthropic_client import AnthropicClient
 from .base import BaseLLMClient
@@ -22,6 +22,9 @@ API_KEY_ENV: dict[Provider, str] = {
     Provider.OPENAI: "OPENAI_API_KEY",
     Provider.ANTHROPIC: "ANTHROPIC_API_KEY",
 }
+# Sólo OpenAI: permite apuntar a servidores compatibles (Ollama, LM Studio...).
+BASE_URL_ENV: dict[Provider, str] = {Provider.OPENAI: "OPENAI_BASE_URL"}
+
 MODEL_ENV: dict[Provider, str] = {
     Provider.OPENAI: "OPENAI_MODEL",
     Provider.ANTHROPIC: "ANTHROPIC_MODEL",
@@ -49,11 +52,25 @@ class ManagerSettings(BaseModel):
 
     provider: Provider
     api_key: SecretStr | None = None  # SecretStr evita que la key aparezca en logs
+    base_url: str | None = Field(
+        default=None,
+        description="URL de un servidor compatible con OpenAI (ej. http://localhost:11434/v1).",
+    )
     model: ModelConfig
     max_concurrency: int = Field(
         default=5, ge=1, le=100,
         description="Máximo de llamadas simultáneas al proveedor (evita el rate limit).",
     )
+
+    @field_validator("base_url")
+    @classmethod
+    def _validar_base_url(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        value = value.strip().rstrip("/")
+        if not value.startswith(("http://", "https://")):
+            raise ValueError("base_url debe empezar con http:// o https://")
+        return value
 
     @classmethod
     def from_env(cls, provider: str | Provider | None = None) -> ManagerSettings:
@@ -72,6 +89,8 @@ class ManagerSettings(BaseModel):
             if (value := os.getenv(env)) not in (None, ""):
                 model_kwargs[field] = value  # Pydantic convierte y valida tipos/rangos
         extra: dict = {}
+        if prov in BASE_URL_ENV and (value := os.getenv(BASE_URL_ENV[prov])):
+            extra["base_url"] = value
         if (value := os.getenv("LLM_MAX_CONCURRENCY")) not in (None, ""):
             extra["max_concurrency"] = value
         return cls(
@@ -103,7 +122,9 @@ class AsyncLLMManager:
     def __init__(self, settings: ManagerSettings) -> None:
         key = settings.require_api_key()
         self.settings = settings
-        self.client: BaseLLMClient = _REGISTRY[settings.provider](settings.model, api_key=key)
+        self.client: BaseLLMClient = _REGISTRY[settings.provider](
+            settings.model, api_key=key, base_url=settings.base_url
+        )
         # Limita las llamadas simultáneas: con muchas tareas en paralelo
         # (asyncio.gather) se evita disparar el rate limit del proveedor.
         self._semaphore = asyncio.Semaphore(settings.max_concurrency)

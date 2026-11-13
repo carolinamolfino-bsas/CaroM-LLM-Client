@@ -22,11 +22,16 @@ class OpenAIClient(BaseLLMClient):
     provider = Provider.OPENAI
     sdk = openai
 
-    def __init__(self, config: ModelConfig, api_key: str | None = None) -> None:
+    def __init__(
+        self, config: ModelConfig, api_key: str | None = None, base_url: str | None = None
+    ) -> None:
         super().__init__(config)
+        # base_url permite usar cualquier servidor compatible con la API de
+        # OpenAI (ej. Ollama local: http://localhost:11434/v1). None = OpenAI.
+        self.base_url = base_url
         # max_retries=0: los reintentos los controla BaseLLMClient.
         self._client = AsyncOpenAI(
-            api_key=api_key, timeout=config.timeout, max_retries=0
+            api_key=api_key, base_url=base_url, timeout=config.timeout, max_retries=0
         )
 
     def _params(self, request: ChatRequest) -> dict:
@@ -34,8 +39,11 @@ class OpenAIClient(BaseLLMClient):
             "model": self.config.model,
             "messages": [m.model_dump() for m in request.messages],
             "temperature": self.config.temperature,
-            "max_completion_tokens": self.config.max_tokens,
         }
+        # OpenAI usa max_completion_tokens; los servidores compatibles (Ollama,
+        # LM Studio, vLLM...) documentan sólo el nombre clásico max_tokens.
+        token_param = "max_tokens" if self.base_url else "max_completion_tokens"
+        params[token_param] = self.config.max_tokens
         if self.config.top_p is not None:
             params["top_p"] = self.config.top_p
         return params

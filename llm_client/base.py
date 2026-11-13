@@ -41,7 +41,9 @@ class BaseLLMClient(ABC):
     provider: Provider
     sdk: ModuleType
 
-    def __init__(self, config: ModelConfig, api_key: str | None = None) -> None:
+    def __init__(
+        self, config: ModelConfig, api_key: str | None = None, base_url: str | None = None
+    ) -> None:
         self.config = config
 
     # ---------- API pública ----------

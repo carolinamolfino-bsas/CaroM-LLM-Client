@@ -44,12 +44,13 @@ class AnthropicClient(BaseLLMClient):
         self,
         config: ModelConfig,
         api_key: str | None = None,
+        base_url: str | None = None,
         *,
         send_sampling_params: bool | None = None,
     ) -> None:
         super().__init__(config)
         self._client = AsyncAnthropic(
-            api_key=api_key, timeout=config.timeout, max_retries=0
+            api_key=api_key, base_url=base_url, timeout=config.timeout, max_retries=0
         )
         self._send_sampling = (
             SUPPORTS_SAMPLING_PARAMS if send_sampling_params is None else send_sampling_params

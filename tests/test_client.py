@@ -421,3 +421,53 @@ def test_shared_error_classification_for_both_sdks():
     assert oc._classify_error(http_error(openai.InternalServerError, 503)).retryable
     assert ac._classify_error(http_error(anthropic.RateLimitError, 429)).type is ErrorType.RATE_LIMIT
     assert not ac._classify_error(http_error(anthropic.AuthenticationError, 401)).retryable
+
+
+# ---------------------------------------------------------------- v1.2: OPENAI_BASE_URL
+
+def test_base_url_from_env_and_validation(monkeypatch):
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://localhost:11434/v1/")
+    assert ManagerSettings.from_env("openai").base_url == "http://localhost:11434/v1"
+    assert ManagerSettings.from_env("anthropic").base_url is None  # sólo aplica a OpenAI
+    monkeypatch.setenv("OPENAI_BASE_URL", "localhost:11434")
+    with pytest.raises(ValidationError):
+        ManagerSettings.from_env("openai")
+
+
+def test_openai_official_uses_max_completion_tokens():
+    from llm_client import ChatRequest
+
+    c = OpenAIClient(ModelConfig(model="gpt-test", max_tokens=99), api_key="k")
+    params = c._params(ChatRequest(messages=MSGS))
+    assert params["max_completion_tokens"] == 99 and "max_tokens" not in params
+
+
+def test_compatible_server_end_to_end_over_http(monkeypatch):
+    """Llamada HTTP real a un servidor local compatible con OpenAI (como Ollama)."""
+    from tests.fake_openai_server import RESPUESTA, FakeOpenAIServer
+
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+    with FakeOpenAIServer() as server:
+        monkeypatch.setenv("OPENAI_BASE_URL", server.base_url)
+        monkeypatch.setenv("OPENAI_API_KEY", "ollama")
+        monkeypatch.setenv("OPENAI_MODEL", "qwen2.5:3b")
+        monkeypatch.setenv("LLM_MAX_TOKENS", "200")
+
+        async def flujo():
+            async with AsyncLLMManager.from_env("openai") as llm:
+                resp = await llm.generate(MSGS)
+                chunks = [c async for c in llm.stream(MSGS)]
+            return resp, chunks
+
+        resp, chunks = run(flujo())
+
+    assert resp.ok and resp.content == RESPUESTA and resp.usage.output_tokens == 9
+    assert "".join(c.text for c in chunks).strip() == RESPUESTA
+    assert chunks[-1].done and chunks[-1].usage.input_tokens == 12
+    assert server.paths == ["/v1/chat/completions"] * 2
+    assert server.auth_headers[0] == "Bearer ollama"
+    normal, streaming = server.requests
+    assert normal["model"] == "qwen2.5:3b"
+    assert normal["max_tokens"] == 200 and "max_completion_tokens" not in normal
+    assert streaming["stream"] is True and streaming["stream_options"] == {"include_usage": True}
